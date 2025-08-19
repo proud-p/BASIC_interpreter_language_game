@@ -9,8 +9,10 @@
 # - Enter saves the row into Program panel (right)
 # - Click a saved row to reload
 # - R runs all saved rows through basic.py
+# - S saves to duck_programs/<timestamp>.duck
 # - Q quits
 
+import os, datetime
 import pygame, math, random
 from basic import run   # your interpreter
 
@@ -27,6 +29,10 @@ GAP = 24
 SAVED_X = GRID_X + ROW_LEN * CELL + GAP
 SAVED_W = 320
 SAVED_Y = GRID_Y - 24
+
+# ───────── export folder ─────────
+EXPORT_DIR = "duck_programs"  # change if you want a different folder
+os.makedirs(EXPORT_DIR, exist_ok=True)
 
 pygame.init()
 screen = pygame.display.set_mode((W, H))
@@ -107,7 +113,7 @@ IDENT_BY_PAIR = {1:"a",2:"b",3:"c",4:"d",5:"e",6:"f",7:"g",8:"h",9:None}
 def tokenize_cells_to_source(cells):
     src=[]; i=0; buf=[]
     def flush(): 
-        nonlocal buf; 
+        nonlocal buf
         if buf: src.append("".join(buf)); buf=[]
     while i<len(cells):
         v=cells[i]; nxt=cells[i+1] if i+1<len(cells) else None
@@ -121,6 +127,9 @@ def tokenize_cells_to_source(cells):
 # ───────── state ─────────
 grid=[-1]*ROW_LEN; cursor=0; duck_heading=1
 saved_rows=[]; toast="paint a row; press Enter to save"; output_lines=[]
+
+def program_source():
+    return "\n".join(r["text"] for r in saved_rows if r["text"])
 
 def add_current_row():
     global toast
@@ -142,17 +151,44 @@ def clear_row():
 
 def run_program():
     global toast,output_lines
-    program_src="\n".join(r["text"] for r in saved_rows if r["text"])
-    if not program_src.strip(): toast="no program"; return
-    value,err=run("<duck>",program_src)
-    if err: msg=getattr(err,"as_string",lambda: str(err))()
-    else: msg=str(value)
+    src=program_source()
+    if not src.strip(): toast="no program"; return
+    value,err=run("<duck>",src)
+    if err:
+        msg=getattr(err,"as_string",lambda: str(err))()
+    else:
+        msg=str(value)
     output_lines.append(msg); toast="ran program"
+
+def save_duck():
+    """Save current program as a .duck file into EXPORT_DIR with timestamp."""
+    global toast
+    src=program_source()
+    if not src.strip():
+        toast="nothing to save"
+        return
+    ts=datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    fname=f"{ts}.duck"               # e.g., 20250820_153512.duck
+    path=os.path.join(EXPORT_DIR,fname)
+    try:
+        with open(path,"w",encoding="utf-8") as f:
+            f.write(src+"\n")
+        toast=f"saved {os.path.join(EXPORT_DIR,fname)}"
+        # also keep a short log line
+        output_lines.append(f"saved → {path}")
+    except Exception as e:
+        toast=f"save error: {e}"
 
 # ───────── drawing ─────────
 def draw_header():
     screen.blit(font.render("Duck Notebook — colour grammar",True,INK),(GRID_X,GRID_Y-68))
-    screen.blit(font_s.render("Space cycle • 0–9 set • Backspace blank • C clear • Enter save • Click saved to load • R run • Q quit",True,INK),(GRID_X,GRID_Y-44))
+    screen.blit(
+        font_s.render(
+            "Space cycle • 0–9 set • Backspace blank • C clear • Enter save • Click saved to load • R run • S save .duck • Q quit",
+            True, INK),
+        (GRID_X,GRID_Y-44)
+    )
+
 def draw_row():
     for i,v in enumerate(grid):
         x=GRID_X+i*CELL; rect=(x,GRID_Y,CELL,CELL)
@@ -160,8 +196,10 @@ def draw_row():
         pygame.draw.rect(screen,GRID_LINE,rect,1)
         if v>=0: screen.blit(font_tiny.render(str(v),True,(60,60,70)),(x+3,GRID_Y+2))
     scribble_rect(screen,(GRID_X+cursor*CELL,GRID_Y,CELL,CELL),INK,3,1)
+
 def draw_duck_at_cursor(dt):
     x=GRID_X+cursor*CELL+CELL//2-22; y=GRID_Y-72; draw_duck(screen,x,y,dt,1)
+
 def draw_program_panel():
     r=pygame.Rect(SAVED_X,SAVED_Y-28,SAVED_W,H-(SAVED_Y-28)-40)
     pygame.draw.rect(screen,(255,255,255),r); scribble_rect(screen,r,INK,2,1)
@@ -174,8 +212,8 @@ def draw_program_panel():
         screen.blit(font_tiny.render(row["text"],True,INK),(SAVED_X+8,y+mini+4))
         row["_rect"]=pygame.Rect(SAVED_X+4,y,SAVED_W-12,mini+22)
         y+=mini+30
+    # toast & outputs
     screen.blit(font_s.render(toast,True,(60,80,140)),(SAVED_X+10,r.bottom-28))
-    # outputs
     oy=r.bottom-60
     for line in output_lines[-5:]:
         screen.blit(font_s.render(line,True,(40,120,40)),(SAVED_X+10,oy))
@@ -198,6 +236,7 @@ def main():
                 elif e.key==pygame.K_c: clear_row()
                 elif e.key in (pygame.K_RETURN,pygame.K_KP_ENTER): add_current_row()
                 elif e.key==pygame.K_r: run_program()
+                elif e.key==pygame.K_s: save_duck()
                 elif e.unicode and e.unicode.isdigit(): set_here(int(e.unicode))
             elif e.type==pygame.MOUSEBUTTONDOWN and e.button==1:
                 mx,my=e.pos
@@ -208,7 +247,11 @@ def main():
                     if row.get("_rect") and row["_rect"].collidepoint(mx,my):
                         load_saved_row_at(i); toast=f"loaded line {i+1}"; break
 
-        draw_paper_bg(); draw_header(); draw_row(); draw_duck_at_cursor(dt); draw_program_panel(); pygame.display.flip()
+        draw_paper_bg(); 
+        # header last to be crisp on top lines
+        draw_row(); draw_duck_at_cursor(dt); draw_program_panel(); 
+        draw_header()
+        pygame.display.flip()
     pygame.quit()
 
 if __name__=="__main__": main()
