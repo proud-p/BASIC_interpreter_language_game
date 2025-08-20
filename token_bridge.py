@@ -10,11 +10,12 @@
 # - Click a saved row to reload
 # - R runs all saved rows through basic.py
 # - S saves to duck_programs/<timestamp>.duck
+# - O loads the most-recent .duck from duck_programs/ (reconstructs colours)
 # - Q quits
 
 import os, datetime
 import pygame, math, random
-from basic import run   # your interpreter
+from basic import run   # your interpreter: run(fn, src) -> (value, err)
 
 # ───────── window / layout ─────────
 W, H = 1280, 740
@@ -31,7 +32,7 @@ SAVED_W = 320
 SAVED_Y = GRID_Y - 24
 
 # ───────── export folder ─────────
-EXPORT_DIR = "duck_programs"  # change if you want a different folder
+EXPORT_DIR = "duck_programs"
 os.makedirs(EXPORT_DIR, exist_ok=True)
 
 pygame.init()
@@ -107,10 +108,16 @@ def draw_duck(surf,x,y,dt,heading=1):
     scribble_line(surf,(x-6,y+16),(x-12,y+22)); scribble_line(surf,(x+8,y+16),(x+14,y+22))
 
 # ───────── colour grammar ─────────
+# doubles → tokens
 OP_BY_DOUBLE = {1:"+",2:"-",3:"*",4:"/",5:"^",6:"(",7:")",8:"=",9:"VAR"}
+# 9 + digit → identifier
 IDENT_BY_PAIR = {1:"a",2:"b",3:"c",4:"d",5:"e",6:"f",7:"g",8:"h",9:None}
+# inverse (for loading .duck back into coloured cells)
+DOUBLE_BY_OP = {"+":1, "-":2, "*":3, "/":4, "^":5, "(":6, ")":7, "=":8}
+IDENT_TO_DIGIT = {v:k for k,v in IDENT_BY_PAIR.items() if v}
 
 def tokenize_cells_to_source(cells):
+    """Encode a row of colour cells into source using the colour grammar."""
     src=[]; i=0; buf=[]
     def flush(): 
         nonlocal buf
@@ -123,6 +130,66 @@ def tokenize_cells_to_source(cells):
         if v==9 and nxt in IDENT_BY_PAIR and IDENT_BY_PAIR[nxt]: flush(); src.append(IDENT_BY_PAIR[nxt]); i+=2; continue
         buf.append(str(v)); i+=1
     flush(); return " ".join(src).strip()
+
+def encode_line_to_cells(line, width=ROW_LEN):
+    """
+    Convert a plain source line (from .duck) back into a colour row.
+    We keep it simple: tokens are digits, single-letter ids a–h, VAR, and ops + - * / ^ ( ) =
+    """
+    cells=[]
+    i=0
+    line=line.strip()
+    while i < len(line) and len(cells) < width:
+        ch=line[i]
+
+        # whitespace
+        if ch.isspace(): i+=1; continue
+
+        # operators
+        if ch in DOUBLE_BY_OP:
+            col=DOUBLE_BY_OP[ch]
+            cells.extend([col,col])
+            i+=1
+            continue
+
+        # parenthesis/operators already covered; numbers
+        if ch.isdigit():
+            # read a whole number
+            j=i
+            while j<len(line) and line[j].isdigit(): j+=1
+            for d in line[i:j]:
+                cells.append(int(d))
+            i=j
+            continue
+
+        # identifiers (single-letter a..h)
+        if ch.isalpha():
+            # read word
+            j=i
+            while j<len(line) and line[j].isalpha(): j+=1
+            word=line[i:j]
+            if word=="VAR":
+                cells.extend([9,9])
+            else:
+                # take first character; if it's a..h, map to 9 + digit
+                c=word[0].lower()
+                if c in IDENT_TO_DIGIT:
+                    cells.extend([9, IDENT_TO_DIGIT[c]])
+                else:
+                    # unknown ident → we’ll just ignore (or you can place blanks)
+                    pass
+            i=j
+            continue
+
+        # anything else → skip
+        i+=1
+
+    # pad to width with blanks
+    if len(cells) < width:
+        cells.extend([-1]*(width-len(cells)))
+    else:
+        cells=cells[:width]
+    return cells
 
 # ───────── state ─────────
 grid=[-1]*ROW_LEN; cursor=0; duck_heading=1
@@ -168,23 +235,46 @@ def save_duck():
         toast="nothing to save"
         return
     ts=datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    fname=f"{ts}.duck"               # e.g., 20250820_153512.duck
+    fname=f"{ts}.duck"
     path=os.path.join(EXPORT_DIR,fname)
     try:
         with open(path,"w",encoding="utf-8") as f:
             f.write(src+"\n")
         toast=f"saved {os.path.join(EXPORT_DIR,fname)}"
-        # also keep a short log line
         output_lines.append(f"saved → {path}")
     except Exception as e:
         toast=f"save error: {e}"
+
+def load_latest_duck():
+    """Load the most recent .duck from EXPORT_DIR and rebuild coloured rows."""
+    global toast, saved_rows
+    try:
+        files=[f for f in os.listdir(EXPORT_DIR) if f.lower().endswith(".duck")]
+        if not files:
+            toast="no .duck files"
+            return
+        files.sort(key=lambda fn: os.path.getmtime(os.path.join(EXPORT_DIR,fn)), reverse=True)
+        path=os.path.join(EXPORT_DIR, files[0])
+        with open(path,"r",encoding="utf-8") as f:
+            lines=[ln.rstrip("\n") for ln in f.readlines()]
+        # rebuild saved_rows
+        saved_rows.clear()
+        for ln in lines:
+            if not ln.strip(): 
+                continue
+            cells=encode_line_to_cells(ln, width=ROW_LEN)
+            saved_rows.append({"cells":cells, "text":ln})
+        toast=f"loaded {files[0]} ({len(saved_rows)} lines)"
+        output_lines.append(f"loaded ← {path}")
+    except Exception as e:
+        toast=f"load error: {e}"
 
 # ───────── drawing ─────────
 def draw_header():
     screen.blit(font.render("Duck Notebook — colour grammar",True,INK),(GRID_X,GRID_Y-68))
     screen.blit(
         font_s.render(
-            "Space cycle • 0–9 set • Backspace blank • C clear • Enter save • Click saved to load • R run • S save .duck • Q quit",
+            "Space cycle • 0–9 set • Backspace blank • C clear • Enter save • Click saved to load • R run • S save .duck • O load latest • Q quit",
             True, INK),
         (GRID_X,GRID_Y-44)
     )
@@ -237,6 +327,7 @@ def main():
                 elif e.key in (pygame.K_RETURN,pygame.K_KP_ENTER): add_current_row()
                 elif e.key==pygame.K_r: run_program()
                 elif e.key==pygame.K_s: save_duck()
+                elif e.key==pygame.K_o: load_latest_duck()
                 elif e.unicode and e.unicode.isdigit(): set_here(int(e.unicode))
             elif e.type==pygame.MOUSEBUTTONDOWN and e.button==1:
                 mx,my=e.pos
@@ -248,9 +339,7 @@ def main():
                         load_saved_row_at(i); toast=f"loaded line {i+1}"; break
 
         draw_paper_bg(); 
-        # header last to be crisp on top lines
-        draw_row(); draw_duck_at_cursor(dt); draw_program_panel(); 
-        draw_header()
+        draw_row(); draw_duck_at_cursor(dt); draw_program_panel(); draw_header()
         pygame.display.flip()
     pygame.quit()
 
